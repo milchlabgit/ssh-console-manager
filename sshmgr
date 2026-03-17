@@ -35,6 +35,8 @@ class C:
     """ANSI color codes, disabled when not a TTY or color is off."""
     BOLD = "\033[1m"
     DIM = "\033[2m"
+    ITALIC = "\033[3m"
+    UNDERLINE = "\033[4m"
     RED = "\033[31m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
@@ -42,13 +44,22 @@ class C:
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
     WHITE = "\033[37m"
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BRIGHT_CYAN = "\033[96m"
+    BG_RED = "\033[41m"
+    BG_GREEN = "\033[42m"
+    BG_BLUE = "\033[44m"
     RESET = "\033[0m"
 
     @classmethod
     def disable(cls):
-        for attr in ("BOLD", "DIM", "RED", "GREEN", "YELLOW", "BLUE",
-                      "MAGENTA", "CYAN", "WHITE", "RESET"):
-            setattr(cls, attr, "")
+        for attr in dir(cls):
+            if attr.isupper() and not attr.startswith("_"):
+                setattr(cls, attr, "")
 
 
 def _init_colors():
@@ -98,20 +109,27 @@ def _save_settings(data: dict):
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _die(msg: str):
-    print(f"{C.RED}Error:{C.RESET} {msg}", file=sys.stderr)
+    print(f"{C.BOLD}{C.RED}✗ Error:{C.RESET} {C.RED}{msg}{C.RESET}", file=sys.stderr)
     sys.exit(1)
 
 
 def _info(msg: str):
-    print(f"{C.CYAN}→{C.RESET} {msg}")
+    print(f"{C.BRIGHT_CYAN}→{C.RESET} {msg}")
 
 
 def _success(msg: str):
-    print(f"{C.GREEN}✓{C.RESET} {msg}")
+    print(f"{C.BRIGHT_GREEN}✓{C.RESET} {C.GREEN}{msg}{C.RESET}")
 
 
 def _warn(msg: str):
-    print(f"{C.YELLOW}!{C.RESET} {msg}")
+    print(f"{C.BRIGHT_YELLOW}⚠{C.RESET} {C.YELLOW}{msg}{C.RESET}")
+
+
+def _header(msg: str):
+    width = max(len(msg) + 4, 40)
+    print(f"\n  {C.BRIGHT_BLUE}{'━' * width}{C.RESET}")
+    print(f"  {C.BOLD}{C.BRIGHT_BLUE}  {msg}{C.RESET}")
+    print(f"  {C.BRIGHT_BLUE}{'━' * width}{C.RESET}\n")
 
 
 def _validate_name(name: str) -> str:
@@ -124,20 +142,21 @@ def _validate_name(name: str) -> str:
 
 
 def _prompt(label: str, default: str = "", required: bool = False) -> str:
-    suffix = f" [{default}]" if default else ""
+    suffix = f" {C.DIM}[{default}]{C.RESET}" if default else ""
+    marker = f"{C.BRIGHT_MAGENTA}*{C.RESET}" if required else " "
     while True:
-        val = input(f"  {label}{suffix}: ").strip()
+        val = input(f"  {marker} {C.BOLD}{label}{C.RESET}{suffix}: ").strip()
         if not val and default:
             return default
         if not val and required:
-            print(f"  {C.RED}Pflichtfeld.{C.RESET}")
+            print(f"    {C.RED}Pflichtfeld.{C.RESET}")
             continue
         return val
 
 
 def _confirm(msg: str, default_yes: bool = False) -> bool:
-    hint = "J/n" if default_yes else "j/N"
-    ans = input(f"  {msg} [{hint}]: ").strip().lower()
+    hint = f"{C.GREEN}J{C.RESET}/{C.DIM}n{C.RESET}" if default_yes else f"{C.DIM}j{C.RESET}/{C.RED}N{C.RESET}"
+    ans = input(f"  {C.YELLOW}?{C.RESET} {msg} [{hint}]: ").strip().lower()
     if not ans:
         return default_yes
     return ans in ("j", "ja", "y", "yes")
@@ -166,39 +185,40 @@ def _build_ssh_args(conn: dict) -> list[str]:
 
 
 def _print_connection(name: str, conn: dict, verbose: bool = False):
-    fav = "★ " if conn.get("favorite") else ""
+    fav = f"{C.BRIGHT_YELLOW}★{C.RESET} " if conn.get("favorite") else "  "
     tags = ""
     if conn.get("tags"):
-        tags = f" {C.DIM}[{', '.join(conn['tags'])}]{C.RESET}"
+        tag_str = " ".join(f"{C.MAGENTA}#{t}{C.RESET}" for t in conn["tags"])
+        tags = f"  {tag_str}"
 
     user = conn.get("user", "")
     host = conn.get("host", "")
     port = conn.get("port", 22)
-    target = f"{user}@{host}" if user else host
-    port_str = f":{port}" if port != 22 else ""
+    target = f"{C.BRIGHT_GREEN}{user}{C.RESET}{C.DIM}@{C.RESET}{C.BRIGHT_CYAN}{host}{C.RESET}" if user else f"{C.BRIGHT_CYAN}{host}{C.RESET}"
+    port_str = f"{C.DIM}:{C.RESET}{C.YELLOW}{port}{C.RESET}" if port != 22 else ""
 
-    print(f"  {C.BOLD}{C.CYAN}{fav}{name}{C.RESET}"
-          f"  {C.WHITE}{target}{port_str}{C.RESET}{tags}")
+    print(f"  {fav}{C.BOLD}{C.WHITE}{name}{C.RESET}"
+          f"  {target}{port_str}{tags}")
 
     if verbose:
         if conn.get("description"):
-            print(f"    {C.DIM}Beschreibung:{C.RESET} {conn['description']}")
+            print(f"      {C.DIM}│{C.RESET} {C.ITALIC}{conn['description']}{C.RESET}")
         if conn.get("identity_file"):
-            print(f"    {C.DIM}Key:{C.RESET} {conn['identity_file']}")
+            print(f"      {C.DIM}│{C.RESET} {C.DIM}Key:{C.RESET}       {C.BLUE}{conn['identity_file']}{C.RESET}")
         if conn.get("proxy_jump"):
-            print(f"    {C.DIM}ProxyJump:{C.RESET} {conn['proxy_jump']}")
+            print(f"      {C.DIM}│{C.RESET} {C.DIM}ProxyJump:{C.RESET} {C.YELLOW}{conn['proxy_jump']}{C.RESET}")
         if conn.get("alias"):
-            print(f"    {C.DIM}Alias:{C.RESET} {conn['alias']}")
+            print(f"      {C.DIM}│{C.RESET} {C.DIM}Alias:{C.RESET}     {C.BRIGHT_MAGENTA}{conn['alias']}{C.RESET}")
         if conn.get("last_connected"):
-            print(f"    {C.DIM}Zuletzt:{C.RESET} {conn['last_connected']}")
+            print(f"      {C.DIM}│{C.RESET} {C.DIM}Zuletzt:{C.RESET}   {C.DIM}{conn['last_connected']}{C.RESET}")
 
 
 def _generate_key_interactive(suggested_name: str = "") -> str | None:
     """Interaktiver Key-Generator. Gibt den Pfad zum erstellten Key zurück, oder None."""
     ssh_dir = Path.home() / ".ssh"
 
-    print(f"\n  {C.BOLD}SSH-Key generieren{C.RESET}\n")
-    print(f"  {C.DIM}Typen:{C.RESET} 1) ed25519 {C.GREEN}(empfohlen){C.RESET}  2) rsa  3) ecdsa")
+    _header("SSH-Key generieren")
+    print(f"    {C.BRIGHT_GREEN}1){C.RESET} ed25519 {C.GREEN}(empfohlen){C.RESET}    {C.DIM}2){C.RESET} rsa    {C.DIM}3){C.RESET} ecdsa")
     type_choice = _prompt("Key-Typ", "1")
     key_types = {"1": "ed25519", "2": "rsa", "3": "ecdsa",
                  "ed25519": "ed25519", "rsa": "rsa", "ecdsa": "ecdsa"}
@@ -270,9 +290,11 @@ def _interactive_select(connections: dict, prompt_text: str = "Verbindung wähle
         return None
 
     names = sorted(connections.keys())
-    print(f"\n  {C.BOLD}{prompt_text}:{C.RESET}\n")
+    _header(prompt_text)
     for i, name in enumerate(names, 1):
-        _print_connection(f"{i:>3}) {name}", connections[name])
+        num = f"{C.BRIGHT_YELLOW}{i:>3}){C.RESET}"
+        print(f"  {num} ", end="")
+        _print_connection(name, connections[name])
     print()
 
     while True:
@@ -321,7 +343,12 @@ def cmd_list(args):
             _warn("Keine Favoriten gesetzt.")
             return
 
-    print(f"\n  {C.BOLD}SSH-Verbindungen ({len(connections)}):{C.RESET}\n")
+    label = "SSH-Verbindungen"
+    if args.favorites:
+        label = "Favoriten"
+    elif args.tag:
+        label = f"Tag: {args.tag}"
+    _header(f"{label} ({len(connections)})")
     for name in sorted(connections.keys()):
         _print_connection(name, connections[name], verbose=args.verbose)
     print()
@@ -332,7 +359,7 @@ def cmd_add(args):
     connections = _load_connections()
     settings = _load_settings()
 
-    print(f"\n  {C.BOLD}Neue SSH-Verbindung anlegen{C.RESET}\n")
+    _header("Neue SSH-Verbindung anlegen")
 
     name = _validate_name(args.name if args.name else _prompt("Name", required=True))
     if name in connections:
@@ -383,8 +410,8 @@ def cmd_edit(args):
         _die(f"Verbindung '{args.name}' nicht gefunden.")
 
     conn = connections[name]
-    print(f"\n  {C.BOLD}Verbindung '{name}' bearbeiten{C.RESET}")
-    print(f"  {C.DIM}(Enter = aktuellen Wert beibehalten){C.RESET}\n")
+    _header(f"Verbindung '{name}' bearbeiten")
+    print(f"  {C.DIM}Enter = aktuellen Wert beibehalten{C.RESET}\n")
 
     conn["host"] = _prompt("Host", conn.get("host", ""))
     conn["port"] = int(_prompt("Port", str(conn.get("port", 22))) or 22)
@@ -440,10 +467,10 @@ def cmd_connect(args):
 
     # Show details before connecting
     if settings.get("show_details_before_connect") and not args.yes:
-        print(f"\n  {C.BOLD}Verbinde mit:{C.RESET}\n")
+        _header(f"Verbinde mit: {name}")
         _print_connection(name, conn, verbose=True)
         ssh_args = _build_ssh_args(conn)
-        print(f"\n    {C.DIM}Befehl:{C.RESET} {' '.join(ssh_args)}\n")
+        print(f"\n    {C.DIM}Befehl:{C.RESET} {C.BRIGHT_GREEN}{' '.join(ssh_args)}{C.RESET}\n")
         if not _confirm("Verbinden?", default_yes=True):
             _info("Abgebrochen.")
             return
@@ -455,7 +482,7 @@ def cmd_connect(args):
     connections[name] = conn
     _save_connections(connections)
 
-    _info(f"Verbinde mit {name}...")
+    print(f"\n  {C.BOLD}{C.BRIGHT_GREEN}▶ Verbinde mit {name}...{C.RESET}\n")
     os.execvp("ssh", ssh_args)
 
 
@@ -491,7 +518,7 @@ def cmd_search(args):
         _warn(f"Keine Treffer für '{args.query}'.")
         return
 
-    print(f"\n  {C.BOLD}Suchergebnisse für '{args.query}' ({len(results)}):{C.RESET}\n")
+    _header(f"Suchergebnisse: '{args.query}' ({len(results)})")
     for name in sorted(results.keys()):
         _print_connection(name, results[name], verbose=True)
     print()
@@ -618,7 +645,7 @@ def cmd_export(args):
 
 def cmd_doctor(args):
     """Konfiguration und SSH-Setup prüfen."""
-    print(f"\n  {C.BOLD}sshmgr Doctor{C.RESET}\n")
+    _header("sshmgr Doctor")
     ok = True
 
     # Check config dir
@@ -722,10 +749,10 @@ def cmd_show(args):
         _die(f"Verbindung '{args.name}' nicht gefunden.")
 
     conn = connections[name]
-    print()
+    _header(f"Verbindung: {name}")
     _print_connection(name, conn, verbose=True)
     ssh_args = _build_ssh_args(conn)
-    print(f"\n    {C.DIM}SSH-Befehl:{C.RESET} {' '.join(ssh_args)}")
+    print(f"\n    {C.DIM}SSH-Befehl:{C.RESET} {C.BRIGHT_GREEN}{' '.join(ssh_args)}{C.RESET}")
     print()
 
 
@@ -738,10 +765,11 @@ def cmd_tag(args):
         for conn in connections.values():
             all_tags.update(conn.get("tags", []))
         if all_tags:
-            print(f"\n  {C.BOLD}Tags:{C.RESET}")
+            _header(f"Tags ({len(all_tags)})")
             for tag in sorted(all_tags):
                 count = sum(1 for c in connections.values() if tag in c.get("tags", []))
-                print(f"    {C.CYAN}{tag}{C.RESET} ({count})")
+                bar = f"{C.BRIGHT_CYAN}{'█' * count}{C.RESET}"
+                print(f"    {C.MAGENTA}#{tag:<20}{C.RESET} {bar} {C.DIM}{count}{C.RESET}")
             print()
         else:
             _info("Keine Tags vorhanden.")

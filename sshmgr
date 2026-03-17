@@ -1,0 +1,1010 @@
+#!/usr/bin/env python3
+"""sshmgr — lightweight SSH connection manager for macOS terminal users."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+from datetime import datetime
+from pathlib import Path
+
+# ── Config ──────────────────────────────────────────────────────────────────
+
+CONFIG_DIR = Path.home() / ".config" / "sshmgr"
+CONNECTIONS_FILE = CONFIG_DIR / "connections.json"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+VERSION = "1.0.0"
+
+DEFAULT_SETTINGS = {
+    "editor": os.environ.get("EDITOR", "nano"),
+    "default_port": 22,
+    "default_user": os.environ.get("USER", "root"),
+    "color": True,
+    "show_details_before_connect": True,
+}
+
+# ── Colors ──────────────────────────────────────────────────────────────────
+
+class C:
+    """ANSI color codes, disabled when not a TTY or color is off."""
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    RESET = "\033[0m"
+
+    @classmethod
+    def disable(cls):
+        for attr in ("BOLD", "DIM", "RED", "GREEN", "YELLOW", "BLUE",
+                      "MAGENTA", "CYAN", "WHITE", "RESET"):
+            setattr(cls, attr, "")
+
+
+def _init_colors():
+    if not sys.stdout.isatty():
+        C.disable()
+        return
+    settings = _load_settings()
+    if not settings.get("color", True):
+        C.disable()
+
+# ── Data layer ──────────────────────────────────────────────────────────────
+
+def _ensure_config_dir():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+
+
+def _load_connections() -> dict:
+    if not CONNECTIONS_FILE.exists():
+        return {}
+    with open(CONNECTIONS_FILE) as f:
+        return json.load(f)
+
+
+def _save_connections(data: dict):
+    _ensure_config_dir()
+    with open(CONNECTIONS_FILE, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.chmod(CONNECTIONS_FILE, 0o600)
+
+
+def _load_settings() -> dict:
+    if not SETTINGS_FILE.exists():
+        return dict(DEFAULT_SETTINGS)
+    with open(SETTINGS_FILE) as f:
+        merged = dict(DEFAULT_SETTINGS)
+        merged.update(json.load(f))
+        return merged
+
+
+def _save_settings(data: dict):
+    _ensure_config_dir()
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(SETTINGS_FILE, 0o600)
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _die(msg: str):
+    print(f"{C.RED}Error:{C.RESET} {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _info(msg: str):
+    print(f"{C.CYAN}→{C.RESET} {msg}")
+
+
+def _success(msg: str):
+    print(f"{C.GREEN}✓{C.RESET} {msg}")
+
+
+def _warn(msg: str):
+    print(f"{C.YELLOW}!{C.RESET} {msg}")
+
+
+def _validate_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        _die("Name darf nicht leer sein.")
+    if not re.match(r'^[a-zA-Z0-9._-]+$', name):
+        _die("Name darf nur Buchstaben, Zahlen, '.', '-' und '_' enthalten.")
+    return name
+
+
+def _prompt(label: str, default: str = "", required: bool = False) -> str:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        val = input(f"  {label}{suffix}: ").strip()
+        if not val and default:
+            return default
+        if not val and required:
+            print(f"  {C.RED}Pflichtfeld.{C.RESET}")
+            continue
+        return val
+
+
+def _confirm(msg: str, default_yes: bool = False) -> bool:
+    hint = "J/n" if default_yes else "j/N"
+    ans = input(f"  {msg} [{hint}]: ").strip().lower()
+    if not ans:
+        return default_yes
+    return ans in ("j", "ja", "y", "yes")
+
+
+def _build_ssh_args(conn: dict) -> list[str]:
+    args = ["ssh"]
+    user = conn.get("user", "")
+    host = conn.get("host", "")
+    port = conn.get("port", 22)
+
+    if port and port != 22:
+        args += ["-p", str(port)]
+    if conn.get("identity_file"):
+        args += ["-i", os.path.expanduser(conn["identity_file"])]
+    if conn.get("proxy_jump"):
+        args += ["-J", conn["proxy_jump"]]
+
+    # Extra SSH options
+    for opt in conn.get("ssh_options", []):
+        args += ["-o", opt]
+
+    target = f"{user}@{host}" if user else host
+    args.append(target)
+    return args
+
+
+def _print_connection(name: str, conn: dict, verbose: bool = False):
+    fav = "★ " if conn.get("favorite") else ""
+    tags = ""
+    if conn.get("tags"):
+        tags = f" {C.DIM}[{', '.join(conn['tags'])}]{C.RESET}"
+
+    user = conn.get("user", "")
+    host = conn.get("host", "")
+    port = conn.get("port", 22)
+    target = f"{user}@{host}" if user else host
+    port_str = f":{port}" if port != 22 else ""
+
+    print(f"  {C.BOLD}{C.CYAN}{fav}{name}{C.RESET}"
+          f"  {C.WHITE}{target}{port_str}{C.RESET}{tags}")
+
+    if verbose:
+        if conn.get("description"):
+            print(f"    {C.DIM}Beschreibung:{C.RESET} {conn['description']}")
+        if conn.get("identity_file"):
+            print(f"    {C.DIM}Key:{C.RESET} {conn['identity_file']}")
+        if conn.get("proxy_jump"):
+            print(f"    {C.DIM}ProxyJump:{C.RESET} {conn['proxy_jump']}")
+        if conn.get("alias"):
+            print(f"    {C.DIM}Alias:{C.RESET} {conn['alias']}")
+        if conn.get("last_connected"):
+            print(f"    {C.DIM}Zuletzt:{C.RESET} {conn['last_connected']}")
+
+
+def _generate_key_interactive(suggested_name: str = "") -> str | None:
+    """Interaktiver Key-Generator. Gibt den Pfad zum erstellten Key zurück, oder None."""
+    ssh_dir = Path.home() / ".ssh"
+
+    print(f"\n  {C.BOLD}SSH-Key generieren{C.RESET}\n")
+    print(f"  {C.DIM}Typen:{C.RESET} 1) ed25519 {C.GREEN}(empfohlen){C.RESET}  2) rsa  3) ecdsa")
+    type_choice = _prompt("Key-Typ", "1")
+    key_types = {"1": "ed25519", "2": "rsa", "3": "ecdsa",
+                 "ed25519": "ed25519", "rsa": "rsa", "ecdsa": "ecdsa"}
+    key_type = key_types.get(type_choice, "ed25519")
+
+    default_name = f"id_{key_type}_{suggested_name}" if suggested_name else f"id_{key_type}"
+    key_name = _prompt("Dateiname", default_name)
+    key_path = ssh_dir / key_name
+
+    if key_path.exists():
+        _warn(f"Key {key_path} existiert bereits!")
+        if not _confirm("Überschreiben?"):
+            return None
+
+    default_comment = os.environ.get("USER", "") + "@" + os.uname().nodename
+    comment = _prompt("Kommentar (z.B. E-Mail)", default_comment)
+
+    bits_args = []
+    if key_type == "rsa":
+        bits = _prompt("Schlüssellänge", "4096")
+        bits_args = ["-b", bits]
+
+    print(f"\n  {C.DIM}Passphrase schützt den Key bei Diebstahl.{C.RESET}")
+    print(f"  {C.DIM}macOS Keychain speichert sie automatisch.{C.RESET}")
+    use_passphrase = _confirm("Passphrase setzen?", default_yes=True)
+
+    cmd = ["ssh-keygen", "-t", key_type, "-f", str(key_path), "-C", comment]
+    cmd += bits_args
+    if not use_passphrase:
+        cmd += ["-N", ""]
+
+    print()
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        _warn("Key-Generierung fehlgeschlagen.")
+        return None
+
+    _success(f"Key erstellt: {key_path}")
+    _success(f"Public Key:   {key_path}.pub")
+    subprocess.run(["ssh-keygen", "-l", "-f", str(key_path)])
+
+    if use_passphrase:
+        print()
+        if _confirm("Key zum macOS Keychain hinzufügen?", default_yes=True):
+            r = subprocess.run(["ssh-add", "--apple-use-keychain", str(key_path)])
+            if r.returncode == 0:
+                _success("Key im Keychain gespeichert.")
+            else:
+                _warn("Keychain-Import fehlgeschlagen.")
+
+    return str(key_path)
+
+
+def _resolve_name(connections: dict, name: str) -> str | None:
+    """Resolve name or alias to connection name."""
+    if name in connections:
+        return name
+    # Check aliases
+    for cname, conn in connections.items():
+        if conn.get("alias") == name:
+            return cname
+    return None
+
+
+def _interactive_select(connections: dict, prompt_text: str = "Verbindung wählen") -> str | None:
+    """Show numbered list and let user pick."""
+    if not connections:
+        _warn("Keine Verbindungen vorhanden.")
+        return None
+
+    names = sorted(connections.keys())
+    print(f"\n  {C.BOLD}{prompt_text}:{C.RESET}\n")
+    for i, name in enumerate(names, 1):
+        _print_connection(f"{i:>3}) {name}", connections[name])
+    print()
+
+    while True:
+        choice = input(f"  Nummer oder Name (q=Abbruch): ").strip()
+        if choice.lower() in ("q", "quit", ""):
+            return None
+        # Try as number
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(names):
+                return names[idx - 1]
+        except ValueError:
+            pass
+        # Try as name/alias
+        resolved = _resolve_name(connections, choice)
+        if resolved:
+            return resolved
+        print(f"  {C.RED}Ungültige Eingabe.{C.RESET}")
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_list(args):
+    """Alle gespeicherten Verbindungen anzeigen."""
+    connections = _load_connections()
+    if not connections:
+        _info("Keine Verbindungen gespeichert. Nutze 'sshmgr add' zum Anlegen.")
+        return
+
+    # Filter by tag
+    if args.tag:
+        connections = {
+            n: c for n, c in connections.items()
+            if args.tag in c.get("tags", [])
+        }
+        if not connections:
+            _warn(f"Keine Verbindungen mit Tag '{args.tag}'.")
+            return
+
+    # Filter favorites
+    if args.favorites:
+        connections = {
+            n: c for n, c in connections.items()
+            if c.get("favorite")
+        }
+        if not connections:
+            _warn("Keine Favoriten gesetzt.")
+            return
+
+    print(f"\n  {C.BOLD}SSH-Verbindungen ({len(connections)}):{C.RESET}\n")
+    for name in sorted(connections.keys()):
+        _print_connection(name, connections[name], verbose=args.verbose)
+    print()
+
+
+def cmd_add(args):
+    """Neue Verbindung anlegen."""
+    connections = _load_connections()
+    settings = _load_settings()
+
+    print(f"\n  {C.BOLD}Neue SSH-Verbindung anlegen{C.RESET}\n")
+
+    name = _validate_name(args.name if args.name else _prompt("Name", required=True))
+    if name in connections:
+        _die(f"Verbindung '{name}' existiert bereits. Nutze 'sshmgr edit {name}'.")
+
+    conn = {}
+    conn["host"] = _prompt("Host", required=True)
+    conn["port"] = int(_prompt("Port", str(settings["default_port"])) or settings["default_port"])
+    conn["user"] = _prompt("User", settings["default_user"])
+    identity = _prompt("SSH Key (Pfad, oder 'neu' zum Generieren)", "~/.ssh/id_ed25519")
+    if identity.lower() in ("neu", "new", "gen", "generate"):
+        generated = _generate_key_interactive(suggested_name=name)
+        identity = generated if generated else "~/.ssh/id_ed25519"
+        if generated:
+            print()
+            if _confirm("Public Key jetzt auf den Server kopieren?", default_yes=True):
+                target = f"{conn['user']}@{conn['host']}" if conn.get("user") else conn["host"]
+                copy_cmd = ["ssh-copy-id", "-i", generated + ".pub"]
+                if conn.get("port") and conn["port"] != 22:
+                    copy_cmd += ["-p", str(conn["port"])]
+                copy_cmd.append(target)
+                print(f"\n  {C.DIM}Führe aus: {' '.join(copy_cmd)}{C.RESET}\n")
+                subprocess.run(copy_cmd)
+        print()
+    conn["identity_file"] = identity
+    conn["description"] = _prompt("Beschreibung")
+    conn["proxy_jump"] = _prompt("ProxyJump (optional)")
+    conn["alias"] = _prompt("Alias (optional)")
+
+    tags_input = _prompt("Tags (kommagetrennt)")
+    conn["tags"] = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
+
+    conn["favorite"] = _confirm("Als Favorit markieren?")
+    conn["ssh_options"] = []
+    conn["created"] = datetime.now().isoformat(timespec="seconds")
+    conn["last_connected"] = None
+
+    connections[name] = conn
+    _save_connections(connections)
+    _success(f"Verbindung '{name}' gespeichert.")
+
+
+def cmd_edit(args):
+    """Verbindung bearbeiten."""
+    connections = _load_connections()
+    name = _resolve_name(connections, args.name)
+    if not name:
+        _die(f"Verbindung '{args.name}' nicht gefunden.")
+
+    conn = connections[name]
+    print(f"\n  {C.BOLD}Verbindung '{name}' bearbeiten{C.RESET}")
+    print(f"  {C.DIM}(Enter = aktuellen Wert beibehalten){C.RESET}\n")
+
+    conn["host"] = _prompt("Host", conn.get("host", ""))
+    conn["port"] = int(_prompt("Port", str(conn.get("port", 22))) or 22)
+    conn["user"] = _prompt("User", conn.get("user", ""))
+    conn["identity_file"] = _prompt("SSH Key", conn.get("identity_file", ""))
+    conn["description"] = _prompt("Beschreibung", conn.get("description", ""))
+    conn["proxy_jump"] = _prompt("ProxyJump", conn.get("proxy_jump", ""))
+    conn["alias"] = _prompt("Alias", conn.get("alias", ""))
+
+    tags_str = ", ".join(conn.get("tags", []))
+    tags_input = _prompt("Tags (kommagetrennt)", tags_str)
+    conn["tags"] = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
+
+    conn["favorite"] = _confirm("Favorit?", conn.get("favorite", False))
+
+    connections[name] = conn
+    _save_connections(connections)
+    _success(f"Verbindung '{name}' aktualisiert.")
+
+
+def cmd_delete(args):
+    """Verbindung löschen."""
+    connections = _load_connections()
+    name = _resolve_name(connections, args.name)
+    if not name:
+        _die(f"Verbindung '{args.name}' nicht gefunden.")
+
+    _print_connection(name, connections[name], verbose=True)
+    if not _confirm(f"\n  Verbindung '{name}' wirklich löschen?"):
+        _info("Abgebrochen.")
+        return
+
+    del connections[name]
+    _save_connections(connections)
+    _success(f"Verbindung '{name}' gelöscht.")
+
+
+def cmd_connect(args):
+    """SSH-Verbindung herstellen."""
+    connections = _load_connections()
+    settings = _load_settings()
+
+    name = _resolve_name(connections, args.name) if args.name else None
+    if not name:
+        if args.name:
+            _die(f"Verbindung '{args.name}' nicht gefunden.")
+        # Interactive selection
+        name = _interactive_select(connections, "Verbindung zum Verbinden wählen")
+        if not name:
+            return
+
+    conn = connections[name]
+
+    # Show details before connecting
+    if settings.get("show_details_before_connect") and not args.yes:
+        print(f"\n  {C.BOLD}Verbinde mit:{C.RESET}\n")
+        _print_connection(name, conn, verbose=True)
+        ssh_args = _build_ssh_args(conn)
+        print(f"\n    {C.DIM}Befehl:{C.RESET} {' '.join(ssh_args)}\n")
+        if not _confirm("Verbinden?", default_yes=True):
+            _info("Abgebrochen.")
+            return
+
+    ssh_args = _build_ssh_args(conn)
+
+    # Update last_connected
+    conn["last_connected"] = datetime.now().isoformat(timespec="seconds")
+    connections[name] = conn
+    _save_connections(connections)
+
+    _info(f"Verbinde mit {name}...")
+    os.execvp("ssh", ssh_args)
+
+
+def cmd_select(args):
+    """Interaktive Auswahl und Verbindung."""
+    connections = _load_connections()
+    name = _interactive_select(connections)
+    if name:
+        args.name = name
+        args.yes = False
+        cmd_connect(args)
+
+
+def cmd_search(args):
+    """Verbindungen durchsuchen."""
+    connections = _load_connections()
+    query = args.query.lower()
+
+    results = {}
+    for name, conn in connections.items():
+        searchable = " ".join([
+            name,
+            conn.get("host", ""),
+            conn.get("user", ""),
+            conn.get("description", ""),
+            conn.get("alias", ""),
+            " ".join(conn.get("tags", [])),
+        ]).lower()
+        if query in searchable:
+            results[name] = conn
+
+    if not results:
+        _warn(f"Keine Treffer für '{args.query}'.")
+        return
+
+    print(f"\n  {C.BOLD}Suchergebnisse für '{args.query}' ({len(results)}):{C.RESET}\n")
+    for name in sorted(results.keys()):
+        _print_connection(name, results[name], verbose=True)
+    print()
+
+
+def cmd_favorites(args):
+    """Favoriten anzeigen."""
+    args.tag = None
+    args.favorites = True
+    args.verbose = True
+    cmd_list(args)
+
+
+def cmd_import_config(args):
+    """Verbindungen aus ~/.ssh/config importieren."""
+    ssh_config = Path.home() / ".ssh" / "config"
+    if args.file:
+        ssh_config = Path(args.file)
+
+    if not ssh_config.exists():
+        _die(f"Datei {ssh_config} nicht gefunden.")
+
+    connections = _load_connections()
+    imported = 0
+
+    current_host = None
+    current_conn = {}
+
+    with open(ssh_config) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+
+            key, value = parts[0].lower(), parts[1]
+
+            if key == "host":
+                # Save previous host
+                if current_host and current_host != "*" and "*" not in current_host:
+                    if current_host not in connections:
+                        connections[current_host] = {
+                            "host": current_conn.get("hostname", current_host),
+                            "port": int(current_conn.get("port", 22)),
+                            "user": current_conn.get("user", ""),
+                            "identity_file": current_conn.get("identityfile", ""),
+                            "proxy_jump": current_conn.get("proxyjump", ""),
+                            "description": f"Importiert aus {ssh_config}",
+                            "alias": "",
+                            "tags": ["imported"],
+                            "favorite": False,
+                            "ssh_options": [],
+                            "created": datetime.now().isoformat(timespec="seconds"),
+                            "last_connected": None,
+                        }
+                        imported += 1
+
+                current_host = value
+                current_conn = {}
+            else:
+                current_conn[key] = value
+
+    # Don't forget last entry
+    if current_host and current_host != "*" and "*" not in current_host:
+        if current_host not in connections:
+            connections[current_host] = {
+                "host": current_conn.get("hostname", current_host),
+                "port": int(current_conn.get("port", 22)),
+                "user": current_conn.get("user", ""),
+                "identity_file": current_conn.get("identityfile", ""),
+                "proxy_jump": current_conn.get("proxyjump", ""),
+                "description": f"Importiert aus {ssh_config}",
+                "alias": "",
+                "tags": ["imported"],
+                "favorite": False,
+                "ssh_options": [],
+                "created": datetime.now().isoformat(timespec="seconds"),
+                "last_connected": None,
+            }
+            imported += 1
+
+    _save_connections(connections)
+    _success(f"{imported} Verbindung(en) aus {ssh_config} importiert.")
+
+
+def cmd_export(args):
+    """Verbindungen als SSH-Config oder JSON exportieren."""
+    connections = _load_connections()
+    if not connections:
+        _warn("Keine Verbindungen zum Exportieren.")
+        return
+
+    if args.format == "json":
+        output = json.dumps(connections, indent=2, ensure_ascii=False)
+    else:
+        # SSH config format
+        lines = [f"# Generated by sshmgr {VERSION}", f"# {datetime.now().isoformat()}", ""]
+        for name in sorted(connections.keys()):
+            conn = connections[name]
+            lines.append(f"Host {name}")
+            lines.append(f"    HostName {conn.get('host', '')}")
+            if conn.get("user"):
+                lines.append(f"    User {conn['user']}")
+            port = conn.get("port", 22)
+            if port and port != 22:
+                lines.append(f"    Port {port}")
+            if conn.get("identity_file"):
+                lines.append(f"    IdentityFile {conn['identity_file']}")
+            if conn.get("proxy_jump"):
+                lines.append(f"    ProxyJump {conn['proxy_jump']}")
+            lines.append("")
+        output = "\n".join(lines)
+
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(output)
+        _success(f"Exportiert nach {args.output}")
+    else:
+        print(output)
+
+
+def cmd_doctor(args):
+    """Konfiguration und SSH-Setup prüfen."""
+    print(f"\n  {C.BOLD}sshmgr Doctor{C.RESET}\n")
+    ok = True
+
+    # Check config dir
+    if CONFIG_DIR.exists():
+        perms = oct(CONFIG_DIR.stat().st_mode)[-3:]
+        if perms == "700":
+            _success(f"Config-Verzeichnis {CONFIG_DIR} (Rechte: {perms})")
+        else:
+            _warn(f"Config-Verzeichnis {CONFIG_DIR} hat Rechte {perms}, empfohlen: 700")
+            ok = False
+    else:
+        _warn(f"Config-Verzeichnis {CONFIG_DIR} existiert nicht.")
+        ok = False
+
+    # Check connections file
+    if CONNECTIONS_FILE.exists():
+        perms = oct(CONNECTIONS_FILE.stat().st_mode)[-3:]
+        conns = _load_connections()
+        if perms == "600":
+            _success(f"Verbindungsdatei: {len(conns)} Verbindungen (Rechte: {perms})")
+        else:
+            _warn(f"Verbindungsdatei hat Rechte {perms}, empfohlen: 600")
+            ok = False
+    else:
+        _info("Noch keine Verbindungen gespeichert.")
+
+    # Check SSH binary
+    ssh_path = shutil.which("ssh")
+    if ssh_path:
+        _success(f"SSH gefunden: {ssh_path}")
+    else:
+        _warn("SSH nicht gefunden!")
+        ok = False
+
+    # Check SSH dir
+    ssh_dir = Path.home() / ".ssh"
+    if ssh_dir.exists():
+        perms = oct(ssh_dir.stat().st_mode)[-3:]
+        _success(f"~/.ssh existiert (Rechte: {perms})")
+    else:
+        _warn("~/.ssh existiert nicht.")
+
+    # Check common keys
+    for key in ["id_ed25519", "id_rsa", "id_ecdsa"]:
+        key_path = ssh_dir / key
+        if key_path.exists():
+            perms = oct(key_path.stat().st_mode)[-3:]
+            status = _success if perms == "600" else _warn
+            status(f"Key {key} (Rechte: {perms})")
+
+    # Check SSH config
+    ssh_config = ssh_dir / "config"
+    if ssh_config.exists():
+        _success(f"~/.ssh/config vorhanden")
+    else:
+        _info("~/.ssh/config nicht vorhanden (optional)")
+
+    # Check connections for issues
+    if CONNECTIONS_FILE.exists():
+        conns = _load_connections()
+        for name, conn in conns.items():
+            if not conn.get("host"):
+                _warn(f"Verbindung '{name}' hat keinen Host!")
+                ok = False
+            idf = conn.get("identity_file", "")
+            if idf:
+                expanded = Path(os.path.expanduser(idf))
+                if not expanded.exists():
+                    _warn(f"Verbindung '{name}': Key {idf} nicht gefunden")
+                    ok = False
+
+    print()
+    if ok:
+        _success("Alles in Ordnung!")
+    else:
+        _warn("Es gibt Warnungen — siehe oben.")
+    print()
+
+
+def cmd_rename(args):
+    """Verbindung umbenennen."""
+    connections = _load_connections()
+    old = _resolve_name(connections, args.old_name)
+    if not old:
+        _die(f"Verbindung '{args.old_name}' nicht gefunden.")
+
+    new = _validate_name(args.new_name)
+    if new in connections:
+        _die(f"Verbindung '{new}' existiert bereits.")
+
+    connections[new] = connections.pop(old)
+    _save_connections(connections)
+    _success(f"'{old}' → '{new}' umbenannt.")
+
+
+def cmd_show(args):
+    """Details einer Verbindung anzeigen."""
+    connections = _load_connections()
+    name = _resolve_name(connections, args.name)
+    if not name:
+        _die(f"Verbindung '{args.name}' nicht gefunden.")
+
+    conn = connections[name]
+    print()
+    _print_connection(name, conn, verbose=True)
+    ssh_args = _build_ssh_args(conn)
+    print(f"\n    {C.DIM}SSH-Befehl:{C.RESET} {' '.join(ssh_args)}")
+    print()
+
+
+def cmd_tag(args):
+    """Tags verwalten."""
+    connections = _load_connections()
+
+    if args.tag_action == "list":
+        all_tags = set()
+        for conn in connections.values():
+            all_tags.update(conn.get("tags", []))
+        if all_tags:
+            print(f"\n  {C.BOLD}Tags:{C.RESET}")
+            for tag in sorted(all_tags):
+                count = sum(1 for c in connections.values() if tag in c.get("tags", []))
+                print(f"    {C.CYAN}{tag}{C.RESET} ({count})")
+            print()
+        else:
+            _info("Keine Tags vorhanden.")
+        return
+
+    name = _resolve_name(connections, args.connection)
+    if not name:
+        _die(f"Verbindung '{args.connection}' nicht gefunden.")
+
+    conn = connections[name]
+    tags = conn.get("tags", [])
+
+    if args.tag_action == "add":
+        for tag in args.tags:
+            if tag not in tags:
+                tags.append(tag)
+        conn["tags"] = tags
+        _save_connections(connections)
+        _success(f"Tags für '{name}': {', '.join(tags)}")
+    elif args.tag_action == "remove":
+        conn["tags"] = [t for t in tags if t not in args.tags]
+        _save_connections(connections)
+        _success(f"Tags für '{name}': {', '.join(conn['tags']) or '(keine)'}")
+
+
+def cmd_fav(args):
+    """Favorit-Status umschalten."""
+    connections = _load_connections()
+    name = _resolve_name(connections, args.name)
+    if not name:
+        _die(f"Verbindung '{args.name}' nicht gefunden.")
+
+    conn = connections[name]
+    conn["favorite"] = not conn.get("favorite", False)
+    connections[name] = conn
+    _save_connections(connections)
+
+    status = "als Favorit markiert" if conn["favorite"] else "kein Favorit mehr"
+    _success(f"'{name}' {status}.")
+
+
+def cmd_keygen(args):
+    """Assistent zum Erstellen eines SSH-Keys."""
+    key_path = _generate_key_interactive()
+    if not key_path:
+        return
+
+    # Public Key auf Server kopieren?
+    print()
+    if _confirm("Public Key auf einen Server kopieren?"):
+        target = _prompt("Ziel (user@host)", required=True)
+        port = _prompt("Port", "22")
+        copy_cmd = ["ssh-copy-id", "-i", key_path + ".pub"]
+        if port != "22":
+            copy_cmd += ["-p", port]
+        copy_cmd.append(target)
+        print(f"\n  {C.DIM}Führe aus: {' '.join(copy_cmd)}{C.RESET}\n")
+        subprocess.run(copy_cmd)
+
+    # Verbindung anlegen?
+    print()
+    if _confirm("Gleich eine sshmgr-Verbindung mit diesem Key anlegen?"):
+        print(f"\n  {C.DIM}Key '{key_path}' wird automatisch eingetragen.{C.RESET}\n")
+        connections = _load_connections()
+        settings = _load_settings()
+
+        name = _validate_name(_prompt("Verbindungsname", required=True))
+        if name in connections:
+            _die(f"Verbindung '{name}' existiert bereits.")
+
+        conn = {}
+        conn["host"] = _prompt("Host", required=True)
+        conn["port"] = int(_prompt("Port", str(settings["default_port"])) or settings["default_port"])
+        conn["user"] = _prompt("User", settings["default_user"])
+        conn["identity_file"] = _prompt("SSH Key", key_path)
+        conn["description"] = _prompt("Beschreibung")
+        conn["proxy_jump"] = _prompt("ProxyJump (optional)")
+        conn["alias"] = _prompt("Alias (optional)")
+        tags_input = _prompt("Tags (kommagetrennt)")
+        conn["tags"] = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
+        conn["favorite"] = _confirm("Als Favorit markieren?")
+        conn["ssh_options"] = []
+        conn["created"] = datetime.now().isoformat(timespec="seconds")
+        conn["last_connected"] = None
+
+        connections[name] = conn
+        _save_connections(connections)
+        _success(f"Verbindung '{name}' gespeichert.")
+
+    print()
+    _success("Fertig!")
+
+
+def cmd_backup(args):
+    """Backup der Verbindungen erstellen."""
+    if not CONNECTIONS_FILE.exists():
+        _warn("Keine Verbindungen zum Sichern.")
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_file = args.output if args.output else CONFIG_DIR / f"connections_backup_{timestamp}.json"
+
+    shutil.copy2(CONNECTIONS_FILE, backup_file)
+    _success(f"Backup erstellt: {backup_file}")
+
+
+def cmd_restore(args):
+    """Backup wiederherstellen."""
+    backup = Path(args.file)
+    if not backup.exists():
+        _die(f"Datei {backup} nicht gefunden.")
+
+    # Validate JSON
+    with open(backup) as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            _die("Ungültige JSON-Datei.")
+
+    if not _confirm(f"Aktuelle Verbindungen mit Backup '{backup}' überschreiben?"):
+        _info("Abgebrochen.")
+        return
+
+    _save_connections(data)
+    _success(f"{len(data)} Verbindung(en) wiederhergestellt.")
+
+# ── CLI setup ───────────────────────────────────────────────────────────────
+
+def main():
+    _init_colors()
+
+    parser = argparse.ArgumentParser(
+        prog="sshmgr",
+        description=f"{C.BOLD}sshmgr{C.RESET} — SSH Connection Manager v{VERSION}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent(f"""\
+            {C.DIM}Beispiele:{C.RESET}
+              sshmgr add                    Neue Verbindung anlegen
+              sshmgr list                   Alle Verbindungen anzeigen
+              sshmgr connect webserver      Mit 'webserver' verbinden
+              sshmgr select                 Interaktive Auswahl
+              sshmgr search prod            Verbindungen durchsuchen
+              sshmgr import                 Aus ~/.ssh/config importieren
+              sshmgr doctor                 Setup prüfen
+        """),
+    )
+    parser.add_argument("-v", "--version", action="version", version=f"sshmgr {VERSION}")
+
+    sub = parser.add_subparsers(dest="command", title="Befehle")
+
+    # list
+    p = sub.add_parser("list", aliases=["ls"], help="Verbindungen auflisten")
+    p.add_argument("-t", "--tag", help="Nach Tag filtern")
+    p.add_argument("-f", "--favorites", action="store_true", help="Nur Favoriten")
+    p.add_argument("-v", "--verbose", action="store_true", help="Details anzeigen")
+    p.set_defaults(func=cmd_list)
+
+    # add
+    p = sub.add_parser("add", aliases=["new"], help="Neue Verbindung anlegen")
+    p.add_argument("name", nargs="?", help="Name der Verbindung")
+    p.set_defaults(func=cmd_add)
+
+    # edit
+    p = sub.add_parser("edit", help="Verbindung bearbeiten")
+    p.add_argument("name", help="Name der Verbindung")
+    p.set_defaults(func=cmd_edit)
+
+    # delete
+    p = sub.add_parser("delete", aliases=["rm"], help="Verbindung löschen")
+    p.add_argument("name", help="Name der Verbindung")
+    p.set_defaults(func=cmd_delete)
+
+    # connect
+    p = sub.add_parser("connect", aliases=["c", "ssh"], help="SSH-Verbindung starten")
+    p.add_argument("name", nargs="?", help="Name der Verbindung")
+    p.add_argument("-y", "--yes", action="store_true", help="Ohne Bestätigung verbinden")
+    p.set_defaults(func=cmd_connect)
+
+    # select
+    p = sub.add_parser("select", aliases=["s"], help="Interaktive Auswahl")
+    p.set_defaults(func=cmd_select)
+
+    # search
+    p = sub.add_parser("search", aliases=["find", "grep"], help="Verbindungen suchen")
+    p.add_argument("query", help="Suchbegriff")
+    p.set_defaults(func=cmd_search)
+
+    # show
+    p = sub.add_parser("show", aliases=["info"], help="Verbindungsdetails anzeigen")
+    p.add_argument("name", help="Name der Verbindung")
+    p.set_defaults(func=cmd_show)
+
+    # favorites
+    p = sub.add_parser("favorites", aliases=["favs"], help="Favoriten anzeigen")
+    p.set_defaults(func=cmd_favorites)
+
+    # fav (toggle)
+    p = sub.add_parser("fav", help="Favorit-Status umschalten")
+    p.add_argument("name", help="Name der Verbindung")
+    p.set_defaults(func=cmd_fav)
+
+    # rename
+    p = sub.add_parser("rename", aliases=["mv"], help="Verbindung umbenennen")
+    p.add_argument("old_name", help="Aktueller Name")
+    p.add_argument("new_name", help="Neuer Name")
+    p.set_defaults(func=cmd_rename)
+
+    # tag
+    p = sub.add_parser("tag", help="Tags verwalten")
+    tag_sub = p.add_subparsers(dest="tag_action")
+    tp = tag_sub.add_parser("list", help="Alle Tags anzeigen")
+    tp = tag_sub.add_parser("add", help="Tags hinzufügen")
+    tp.add_argument("connection", help="Verbindungsname")
+    tp.add_argument("tags", nargs="+", help="Tags")
+    tp = tag_sub.add_parser("remove", help="Tags entfernen")
+    tp.add_argument("connection", help="Verbindungsname")
+    tp.add_argument("tags", nargs="+", help="Tags")
+    p.set_defaults(func=cmd_tag)
+
+    # import
+    p = sub.add_parser("import", help="Aus SSH-Config importieren")
+    p.add_argument("-f", "--file", help="Pfad zur SSH-Config")
+    p.set_defaults(func=cmd_import_config)
+
+    # export
+    p = sub.add_parser("export", help="Verbindungen exportieren")
+    p.add_argument("--format", choices=["json", "ssh-config"], default="ssh-config",
+                    help="Export-Format (default: ssh-config)")
+    p.add_argument("-o", "--output", help="Ausgabedatei")
+    p.set_defaults(func=cmd_export)
+
+    # backup
+    p = sub.add_parser("backup", help="Backup erstellen")
+    p.add_argument("-o", "--output", help="Backup-Datei")
+    p.set_defaults(func=cmd_backup)
+
+    # restore
+    p = sub.add_parser("restore", help="Backup wiederherstellen")
+    p.add_argument("file", help="Backup-Datei")
+    p.set_defaults(func=cmd_restore)
+
+    # keygen
+    p = sub.add_parser("keygen", aliases=["key"], help="SSH-Key generieren (Assistent)")
+    p.set_defaults(func=cmd_keygen)
+
+    # doctor
+    p = sub.add_parser("doctor", help="Setup und Konfiguration prüfen")
+    p.set_defaults(func=cmd_doctor)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print(f"\n{C.DIM}Abgebrochen.{C.RESET}")
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

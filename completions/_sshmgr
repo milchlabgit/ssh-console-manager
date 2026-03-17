@@ -1,0 +1,134 @@
+#compdef sshmgr
+
+# Zsh completion for sshmgr — SSH Connection Manager
+
+_sshmgr_connections() {
+    local config_file="$HOME/.config/sshmgr/connections.json"
+    if [[ -f "$config_file" ]]; then
+        local names
+        names=($(python3 -c "
+import json, sys
+try:
+    with open('$config_file') as f:
+        print(' '.join(json.load(f).keys()))
+except: pass
+" 2>/dev/null))
+        _describe 'connection' names
+    fi
+}
+
+_sshmgr_tags() {
+    local config_file="$HOME/.config/sshmgr/connections.json"
+    if [[ -f "$config_file" ]]; then
+        local tags
+        tags=($(python3 -c "
+import json
+try:
+    with open('$config_file') as f:
+        conns = json.load(f)
+    tags = set()
+    for c in conns.values():
+        tags.update(c.get('tags', []))
+    print(' '.join(sorted(tags)))
+except: pass
+" 2>/dev/null))
+        _describe 'tag' tags
+    fi
+}
+
+_sshmgr() {
+    local -a commands
+    commands=(
+        'list:Verbindungen auflisten'
+        'ls:Verbindungen auflisten'
+        'add:Neue Verbindung anlegen'
+        'new:Neue Verbindung anlegen'
+        'edit:Verbindung bearbeiten'
+        'delete:Verbindung löschen'
+        'rm:Verbindung löschen'
+        'connect:SSH-Verbindung starten'
+        'c:SSH-Verbindung starten'
+        'ssh:SSH-Verbindung starten'
+        'select:Interaktive Auswahl'
+        's:Interaktive Auswahl'
+        'search:Verbindungen suchen'
+        'find:Verbindungen suchen'
+        'grep:Verbindungen suchen'
+        'show:Verbindungsdetails anzeigen'
+        'info:Verbindungsdetails anzeigen'
+        'favorites:Favoriten anzeigen'
+        'favs:Favoriten anzeigen'
+        'fav:Favorit-Status umschalten'
+        'rename:Verbindung umbenennen'
+        'mv:Verbindung umbenennen'
+        'tag:Tags verwalten'
+        'import:Aus SSH-Config importieren'
+        'export:Verbindungen exportieren'
+        'backup:Backup erstellen'
+        'restore:Backup wiederherstellen'
+        'doctor:Setup prüfen'
+    )
+
+    _arguments -C \
+        '-v[Version anzeigen]' \
+        '--version[Version anzeigen]' \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case "$state" in
+        command)
+            _describe 'command' commands
+            ;;
+        args)
+            case "$words[1]" in
+                connect|c|ssh|edit|delete|rm|show|info|fav)
+                    _sshmgr_connections
+                    ;;
+                rename|mv)
+                    if (( CURRENT == 2 )); then
+                        _sshmgr_connections
+                    fi
+                    ;;
+                search|find|grep)
+                    _message 'search query'
+                    ;;
+                list|ls)
+                    _arguments \
+                        '-t[Nach Tag filtern]:tag:_sshmgr_tags' \
+                        '--tag[Nach Tag filtern]:tag:_sshmgr_tags' \
+                        '-f[Nur Favoriten]' \
+                        '--favorites[Nur Favoriten]' \
+                        '-v[Details anzeigen]' \
+                        '--verbose[Details anzeigen]'
+                    ;;
+                export)
+                    _arguments \
+                        '--format[Export-Format]:format:(json ssh-config)' \
+                        '-o[Ausgabedatei]:file:_files' \
+                        '--output[Ausgabedatei]:file:_files'
+                    ;;
+                import)
+                    _arguments \
+                        '-f[SSH-Config Datei]:file:_files' \
+                        '--file[SSH-Config Datei]:file:_files'
+                    ;;
+                restore)
+                    _files -g '*.json'
+                    ;;
+                tag)
+                    local -a tag_cmds
+                    tag_cmds=('list:Alle Tags' 'add:Tags hinzufügen' 'remove:Tags entfernen')
+                    if (( CURRENT == 2 )); then
+                        _describe 'tag command' tag_cmds
+                    elif (( CURRENT == 3 )); then
+                        _sshmgr_connections
+                    elif (( CURRENT >= 4 )); then
+                        _sshmgr_tags
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_sshmgr "$@"

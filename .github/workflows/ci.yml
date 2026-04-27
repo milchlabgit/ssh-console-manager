@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  runner-smoke:
+    name: Runner smoke
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner environment
+        run: |
+          echo "repo=$GITHUB_REPOSITORY"
+          echo "ref=$GITHUB_REF"
+          uname -a
+          python3 --version || true
+          node --version || true
+          npm --version || true
+          docker --version || true

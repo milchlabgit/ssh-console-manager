@@ -236,7 +236,7 @@ To add a new command: create a `cmd_<name>(args)` function and register it as a 
 
 ## Claude-Konfiguration
 
-- **Modell-Stufe B**: `sonnet` (Sonnet 5.5), Effort `medium` – siehe `.claude/settings.json`.
+- **Modell**: kein projektweites Modell. Die Hauptsession läuft mit dem globalen Default; das Modell wird pro Aufgabe über Subagent oder Skill gewählt (Review/Architektur/Security = `fable`, Umsetzung/QA/Doku = `sonnet`, Suche/Routine = `haiku`). Weitere Regeln in `.claude/settings.json`.
 - **Repo**: `milchlabgit/ssh-console-manager`, Default-Branch `main`. **Das Repo ist öffentlich (PUBLIC)** – keine echten Hostnamen, IPs, Benutzernamen, Keys oder `connections.json` des Owners in Code, Tests, Doku oder Issues. Beispiele nur mit `example.com`/`192.0.2.x`.
 - `~/.config/sshmgr/` und `~/.ssh/` werden von Claude nicht gelesen (deny in settings); `sshmgr connect` wird nicht automatisch ausgeführt.
 

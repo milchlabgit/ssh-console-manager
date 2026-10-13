@@ -1,0 +1,39 @@
+name: Feature
+description: Neue Funktion oder Erweiterung
+title: "[Feature] "
+labels: ["feature", "needs-triage"]
+body:
+  - type: textarea
+    id: ziel
+    attributes:
+      label: Ziel / Nutzen
+      description: Welches Problem löst das Feature, für wen?
+    validations:
+      required: true
+  - type: textarea
+    id: umfang
+    attributes:
+      label: Umfang
+      description: Was gehört dazu, was explizit nicht?
+    validations:
+      required: true
+  - type: textarea
+    id: akzeptanz
+    attributes:
+      label: Akzeptanzkriterien
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: dropdown
+    id: prio
+    attributes:
+      label: Priorität
+      options: ["priority:high", "priority:medium", "priority:low"]
+      default: 1
+  - type: textarea
+    id: notizen
+    attributes:
+      label: Technische Notizen
+      description: Betroffene Module, Abhängigkeiten, offene Fragen

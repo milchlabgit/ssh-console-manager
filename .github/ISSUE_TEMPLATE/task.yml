@@ -1,0 +1,25 @@
+name: Task
+description: Technische Aufgabe, Refactoring, Doku, Chore
+title: "[Task] "
+labels: ["task"]
+body:
+  - type: textarea
+    id: aufgabe
+    attributes:
+      label: Aufgabe
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of Done
+      placeholder: |
+        - [ ] Umgesetzt
+        - [ ] Tests grün
+        - [ ] Doku aktualisiert
+  - type: dropdown
+    id: prio
+    attributes:
+      label: Priorität
+      options: ["priority:high", "priority:medium", "priority:low"]
+      default: 2

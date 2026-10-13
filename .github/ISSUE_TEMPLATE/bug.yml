@@ -1,0 +1,37 @@
+name: Bug
+description: Etwas funktioniert nicht wie erwartet
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: beschreibung
+    attributes:
+      label: Beschreibung
+      description: Was passiert, was sollte passieren?
+    validations:
+      required: true
+  - type: textarea
+    id: schritte
+    attributes:
+      label: Schritte zum Reproduzieren
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: umgebung
+    attributes:
+      label: Umgebung
+      placeholder: Version, Branch, Gerät, Browser, OS
+  - type: dropdown
+    id: prio
+    attributes:
+      label: Priorität
+      options: ["priority:high", "priority:medium", "priority:low"]
+      default: 1
+  - type: textarea
+    id: akzeptanz
+    attributes:
+      label: Akzeptanzkriterien
+      description: Wann gilt der Bug als behoben? (wird vom QA-Agent geprüft)
